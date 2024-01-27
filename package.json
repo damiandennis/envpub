@@ -1,7 +1,27 @@
 {
   "name": "envpub",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "a configurable local environment to connect to a remote one",
+  "homepage": "https://github.com/damiandennis/envpub",
+  "bugs": "https://github.com/damiandennis/envpub/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/damiandennis/envpub.git"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "keywords": [
+    "dotenv",
+    "env",
+    "envpub",
+    ".envpub",
+    ".env",
+    "environment",
+    "variables",
+    "config",
+    "settings"
+  ],
   "main": "bin/run",
   "bin": {
     "envpub": "./bin/run"

@@ -66,9 +66,9 @@ envpub delete
 ```
 
 Also be aware that there is only a single password for the entire file if using encryption, this was done for simplicity.
-You can update a password by running the following command
+You can change a password by running the following command
 ```
-envpub update-password
+envpub change-password
 ```
 You can also performa a json dump with encrypted data in file by running the following command
 ```
