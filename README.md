@@ -75,10 +75,10 @@ You can also performa a json dump with encrypted data in file by running the fol
 envpub dump-data
 ```
 
-It is also possible to encrypt and decrypt string using the following commands, this is useful if you have had two people enter different passwords in the shared file and data has been merged as this would require you  to extract the data out manually, coordination between team members is manual for the shared password.
+It is also possible to encrypt and decrypt a string using the following commands, this is useful if you have had two people enter different passwords in the shared file and data has been merged as this would require you  to extract the data out manually, coordination between team members is manual for the shared password.
 ```
 envpub encrypt <string>
 envpub decrypt <string>
 ```
 
-You should also backup your data in keepass or a similar application in case of data loss.
+You should also backup your data in keepass or a similar application in case of loss as this application is provided as is no assurances are made to its accuracy.

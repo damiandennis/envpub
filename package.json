@@ -1,6 +1,6 @@
 {
   "name": "envpub",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "a configurable local environment to connect to a remote one",
   "homepage": "https://github.com/damiandennis/envpub",
   "bugs": "https://github.com/damiandennis/envpub/issues",
