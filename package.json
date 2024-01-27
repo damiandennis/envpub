@@ -1,0 +1,22 @@
+{
+  "name": "envpub",
+  "version": "1.0.0",
+  "description": "a configurable local environment to connect to a remote one",
+  "main": "bin/run",
+  "bin": {
+    "envpub": "./bin/run"
+  },
+  "scripts": {
+    "start": "node bin/run",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Damian Dennis",
+  "license": "ISC",
+  "dependencies": {
+    "@inquirer/prompts": "^3.3.0",
+    "commander": "^11.1.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "nodemon": "^3.0.2"
+  }
+}

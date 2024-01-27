@@ -1,0 +1,766 @@
+#!/usr/bin/env node
+
+const path = require('path');
+const fs = require('fs');
+const { spawn } = require('child_process');
+const readline = require('readline');
+const nodemon = require('nodemon');
+const { Command } = require('commander');
+const program = new Command();
+const crypto = require('crypto');
+const { input, password, confirm } = require('@inquirer/prompts');
+const ENV_FILE = process.cwd() + path.sep + '.env';
+const PUBLIC_ENV_FILE = process.cwd() + path.sep + '.envpub';
+require('dotenv').config({ path: ENV_FILE });
+
+const DEFAULT_ALGO = 'aes-192-cbc';
+let MEMORY_USERPASS = '';
+
+/**
+ * Encrypts data with a password
+ * @param data 
+ * @param password 
+ * @returns 
+ */
+const encryptData = (data, password, saltSet = null, ivSet = null) => {
+    const salt = saltSet || crypto.randomUUID();
+    const iv = ivSet ? Buffer.from(ivSet, "hex") : crypto.randomBytes(16); // generate different ciphertext everytime
+    const key = crypto.scryptSync(password, salt, 24); //create key
+    const cipher = crypto.createCipheriv(DEFAULT_ALGO, key, iv);  
+    const encryptedResponse = cipher.update(data, 'utf8', 'hex') + cipher.final('hex');
+    return {
+        value: encryptedResponse,
+        iv: Buffer.from(iv).toString("hex"),
+        salt
+    };
+}
+
+/**
+ * Decrypts data with a password
+ * 
+ * @param data object consisting of value, iv and salt
+ * @param password 
+ * @returns 
+ */
+const decryptData = (data, password) => {
+    if (!data.iv) throw new Error("IV not found");
+    const key = crypto.scryptSync(password, data.salt, 24); //create key
+    const decipher = crypto.createDecipheriv(
+        DEFAULT_ALGO,
+        key,
+        Buffer.from(data.iv, "hex")
+      );
+    return decipher.update(data.value, "hex", "utf8") + decipher.final("utf8");
+}
+
+/**
+ * Prompts for input to encrypt data.
+ * 
+ * @param encryptDataResponse 
+ * @returns 
+ */
+const promptToEncrypt = async (encryptDataResponse) => {
+
+    if (MEMORY_USERPASS) {
+        return encryptData(encryptDataResponse, MEMORY_USERPASS);
+    }
+    let passwordResponse = '';
+    do {
+        passwordResponse = await password({ message: 'Enter the password for unlock (all variables encrypted in env files):' });
+        MEMORY_USERPASS = passwordResponse;
+    } while (!passwordResponse);
+    const encryptedAndIv = encryptData(encryptDataResponse, passwordResponse);
+    return encryptedAndIv;
+    
+}
+
+/**
+ * Prompts for input to encrypt data with custom message but does not save to memory and returns encrypted with password.
+ * 
+ * @param encryptDataResponse 
+ * @returns 
+ */
+const promptForPassword = async (message) => {
+    let passwordResponse = '';
+    do {
+        passwordResponse = await password({ message });
+    } while (!passwordResponse);
+    return passwordResponse;
+    
+}
+
+/**
+ * Prompts for input to decrypt data.
+ */
+const promptToDecrypt = async (decryptDataResponse) => {
+
+    if (MEMORY_USERPASS) {
+        return decryptData(decryptDataResponse, MEMORY_USERPASS);
+    }
+
+    let passwordResponse = '';
+    do {
+        passwordResponse = await password({ message: 'Enter the password to unlock encrypted variables in env file:' });
+    } while (!passwordResponse);
+    const finalOutput = decryptData(decryptDataResponse, passwordResponse);
+    MEMORY_USERPASS = passwordResponse;
+    return finalOutput;
+}
+
+/**
+ * Prompts for proxy input and whether to encrypt or not.
+ * 
+ * @returns 
+ */
+const promptForProxy = async () => {
+    const requireProxyResponse = await confirm({ message: 'Do you require a proxy:' });
+    if (requireProxyResponse) {
+        let usernameResponse = '';
+        let passwordResponse = '';
+        let proxyUrlResponse = '';
+        do {
+            proxyUrlResponse = await input({ message: 'Enter your proxy without user/pass e.g. myproxy.com:' });
+        } while (!proxyUrlResponse);
+        const requireProxyPasswordResponse = await confirm({ message: 'Does your proxy require a username/password:' });
+        if (requireProxyPasswordResponse) {
+            do {
+                usernameResponse = await input({ message: 'Enter your username:' });
+            } while (!usernameResponse);
+            do {
+                passwordResponse = await password({ message: 'Enter your password:' });
+            } while (!passwordResponse);
+            console.log(`proxy is set as http://${usernameResponse}:###@${proxyUrlResponse}`);
+            return [true, true, `http://${usernameResponse}:${passwordResponse}@${proxyUrlResponse}`];
+        } else {
+            console.log(`proxy is set as http://${proxyUrlResponse}`);
+            return [true, false, `http://${proxyUrlResponse}`];
+        }
+    }
+    return [false, false, '']
+};
+
+/**
+ * Writes the .env file from the .envpub file.
+ * @param options 
+ */
+const writeEnvFileFromPublic = async (options) => {
+
+    const fileInStream = fs.createReadStream(PUBLIC_ENV_FILE);
+    const rl = readline.createInterface({
+        input: fileInStream,
+        crlfDelay: Infinity
+    });
+    let containsSharedEncryptedData = false;
+    let containsPrivateEncryptedData = false;
+    const lines = [];
+    for await (const line of rl) {
+        try {
+            if (line.indexOf('=' !== -1)) {
+                const value = line.substring(line.indexOf('=') + 1);
+                const meta = JSON.parse(value);
+                if (meta.encrypted && !meta.private) {
+                    containsSharedEncryptedData = meta;
+                }
+                if (meta.encrypted && meta.private) {
+                    containsPrivateEncryptedData = true;
+                }
+            }
+        } catch (e) {
+            // do nothing might be standard environment variable.
+        }
+        lines.push(line);
+    }
+    if (containsSharedEncryptedData && containsPrivateEncryptedData) {
+        await promptToDecrypt(containsSharedEncryptedData); // if it contains both private and public then we need the password to encrypt new private data.
+    }
+
+    const fileOutStream = fs.createWriteStream(ENV_FILE);
+
+    for (const line of lines) {
+        try {
+            if (line.indexOf('=' !== -1)) {
+                const key = line.substring(0, line.indexOf('='));
+                if (key.indexOf('#') === -1) { // make sure no comment.
+                    const value = line.substring(line.indexOf('=') + 1);
+                    const meta = JSON.parse(value);
+                    if (meta.private) {
+                        let promptValue = '';
+                        do {
+                            promptValue = await password({ message: `Enter a value for the private variable ${key}:` });
+                        } while (!promptValue);
+                        if (meta.encrypted) {
+                            const encryptedData = encryptData(promptValue, MEMORY_USERPASS, meta.salt, meta.iv);
+                            meta.value = encryptedData.value;
+                        } else {
+                            meta.value = promptValue;
+                        }
+                        fileOutStream.write(`${key}=${JSON.stringify(meta)}` + "\n");
+                        continue;
+                    }
+                }
+            }
+        } catch (e) {
+            // do nothing might be standard environment variable.
+        }
+        fileOutStream.write(line + "\n");
+    }
+}
+
+
+/**
+ * Builds the initial .env file.
+ * 
+ * @returns 
+ */
+const init = async (options) => {
+    let addMoreResponse = false;
+    if (fs.existsSync(ENV_FILE)) {
+        const overwriteFile = await confirm({ message: '.env file already exists, file will be overwritten are you sure you want to continue:', default: false });
+        if (!overwriteFile) {
+            return;
+        }
+    }
+    if (!fs.existsSync(ENV_FILE) && fs.existsSync(PUBLIC_ENV_FILE)) {
+        const writeEnvFromPublic = await confirm({ message: '.envpub file exists but no .env file exists, do you wish to generate .env file from .envpub file:', default: true });
+        if (writeEnvFromPublic) {
+            await writeEnvFileFromPublic(options);
+            return;
+        }
+    }
+    const envVariables = {};
+    let variablesAdded = 0;
+    if (options.proxy) {
+        let [hasProxy, hasPass, proxyResponse] = await promptForProxy();
+        if (hasProxy) {
+            let proxyData;
+            const encryptProxyResponse = hasPass ? true : await confirm({ message: 'Do you wish to encrypt the proxy:' });
+            const privateOnlyProxyResponse = await confirm({ message: 'Do you wish this variable to be private only (not included in envpub):' });
+            if (encryptProxyResponse) {
+                proxyData = await promptToEncrypt(proxyResponse);
+            } else {
+                proxyData = {value: proxyResponse}
+            }
+            const metaData = {encrypted: encryptProxyResponse, private: privateOnlyProxyResponse, ...proxyData};
+            envVariables['HTTPS_PROXY'] = JSON.stringify(metaData);
+            envVariables['HTTP_PROXY'] = JSON.stringify(metaData);
+            variablesAdded ++;
+        }
+    }
+    do {
+        const promptMessage = variablesAdded > 0 ? 'Do you wish to add more encrypted or private variables:' : 'Do you wish to add encrypted or private variables:';
+        addMoreResponse = await confirm({ message: promptMessage });
+        if (addMoreResponse) {
+            let variableNameResponse;
+            let variableDataResponse;
+            do {
+                variableNameResponse = await input({ message: 'Enter the variable name:' });
+            } while (!variableNameResponse);
+            do {
+                variableDataResponse = await password({ message: 'Enter the variable value:' });
+            } while (!variableDataResponse);
+            const encryptVariableResponse = await confirm({ message: 'Do you wish to encrypt this variable:' });
+            const privateOnlyVariableResponse = await confirm({ message: 'Do you wish this variable to be private only (not included in envpub):' });
+            if (encryptVariableResponse) {
+                variableDataResponse = await promptToEncrypt(variableDataResponse);
+            } else {
+                variableDataResponse = {value: variableDataResponse};
+            }
+            const metaData = {encrypted: encryptVariableResponse, private: privateOnlyVariableResponse, ...variableDataResponse};
+            envVariables[variableNameResponse] = JSON.stringify(metaData);
+            variablesAdded ++;
+        }
+
+    } while(addMoreResponse);
+    variablesAdded = 0;
+    do {
+        const promptMessage = variablesAdded > 0 ? 'Do you wish to add any more public shareable variables:' : 'Do you wish to add any public shareable variables:';
+        addMoreResponse = await confirm({ message: promptMessage });
+        if (addMoreResponse) {
+            let variableNameResponse = '';
+            let variableDataResponse = '';
+            do {
+                variableNameResponse = await input({ message: 'Enter the variable name:' });
+            } while (!variableNameResponse);
+            do {
+                variableDataResponse = await input({ message: 'Enter the variable value:' });
+            } while (!variableDataResponse);
+            const metaData = {encrypted: false, private: false, value: variableDataResponse};
+            envVariables[variableNameResponse] = JSON.stringify(metaData);
+            variablesAdded ++;
+        }
+    } while(addMoreResponse);
+
+
+    const envFileRef = fs.createWriteStream(ENV_FILE);
+    Object.keys(envVariables).forEach((variableName) => {
+        const variableValue = envVariables[variableName];
+        envFileRef.write(`${variableName}=${variableValue}\n`);
+    })
+    envFileRef.end();
+    const envPublicFileRef = fs.createWriteStream(PUBLIC_ENV_FILE);
+    Object.keys(envVariables).forEach((variableName) => {
+        let variableValue = envVariables[variableName];
+        let variableValueJson = {value: variableValue};
+        try {
+            variableValueJson = JSON.parse(variableValue);
+        } catch (e) {
+            // do nothing as just a plain variable most likely..
+        }
+        if (variableValueJson.private) {
+            variableValueJson.value = ''; // dont include value only meta for public.
+            if (variableValueJson.encrypted) {
+                variableValueJson.iv = '';
+                variableValueJson.salt = '';
+            }
+        }
+        envPublicFileRef.write(`${variableName}=${JSON.stringify(variableValueJson)}\n`);
+    })
+    envPublicFileRef.end();
+    MEMORY_USERPASS = ''; // clear after decrypting variables.
+}
+
+/**
+ * decrypts environment variables with prompt for first entry (all passwords should be the same for same file)
+ * @returns 
+ */
+const decryptEnvironmentVariables = async (encryptedEnvVariables) => {
+    const env = {};
+    for (let envName of Object.keys(encryptedEnvVariables)) {
+        let variableValueJson = {value: encryptedEnvVariables[envName], encrypted: false, private: false};
+        try {
+            variableValueJson = JSON.parse(encryptedEnvVariables[envName]);
+        } catch (e) {
+            // do nothing as just a plain variable most likely..
+        }
+        if (variableValueJson.encrypted) {
+            variableValueJson.value = await promptToDecrypt(variableValueJson);
+        }
+        env[envName] = variableValueJson.value;
+    }
+    MEMORY_USERPASS = ''; // clear after decrypting variables.
+    return env;
+}
+
+/**
+ * Starts a nodemon instance with environment variables decrypted in memory.
+ * 
+ * @param app 
+ * @param options 
+ */
+const startWeb = async (app, options) => {
+    let env;
+    try {
+        env = await decryptEnvironmentVariables(process.env);
+    } catch (ex) {
+        console.error('unable to decrypt .env file to start web app, exiting...');
+        process.exit(1);
+    }
+    const watch = [
+        `${process.cwd() + path.sep + app}`, 
+        `${process.cwd() + path.sep + '.env'}`
+    ];
+    if (options.watchExtra) {
+        watch.push(process.cwd() + path.sep + options.watchExtra);
+    }
+    nodemon({
+        script: process.cwd() + path.sep + app,
+        watch,
+        env
+    });
+
+    nodemon
+        .on('start', function () {
+            console.log('App has started');
+        })
+        .on('quit', function () {
+            console.log('App has quit');
+            process.exit();
+        })
+        .on('restart', function (files) {
+            console.log('App restarted due to: ', files);
+        });
+}
+
+/**
+ * Starts a node script with environment variables decrypted in memory.
+ * 
+ * @param app 
+ * @param options 
+ */
+const startApp = async (app, args, options) => {
+    let env;
+    try {
+        env = await decryptEnvironmentVariables(process.env);
+    } catch (ex) {
+        console.error('unable to decrypt .env file to start application, exiting...');
+        process.exit(1);
+    }
+    const child = spawn(app, args, {env});
+    child.stdout.on('data', (data) => {
+        console.log(`stdout:\n${data}`);
+    });
+    
+    child.stderr.on('data', (data) => {
+        console.error(`stderr: ${data}`);
+    });
+}
+
+/**
+ * Loads an env or envpub file into memory.
+ * 
+ * @param file 
+ * @returns 
+ */
+const loadFileToMemory = async (file) => {
+    const fileStream = fs.createReadStream(file);
+    const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity
+    });
+    const lines = [];
+    for await (const line of rl) {
+        let key = '';
+        let value = '';
+        let comment = '';
+        try {
+            let subLine = line;
+            const commentIndex = line.indexOf('#');
+            if (commentIndex !== -1) {
+                subLine = line.substring(0, commentIndex);
+                comment = line.substring(commentIndex + 1);
+            }
+            const valueIndex = subLine.indexOf('=');
+            if (valueIndex !== -1) {
+                key = subLine.substring(0, valueIndex);
+                value = subLine.substring(valueIndex + 1);
+                value = JSON.parse(value);
+                lines.push({line, key, ...value, comment});
+                continue;
+            }
+        } catch (e) {
+            lines.push({line, key, value, comment});
+            continue;
+        }
+        lines.push({line, key, value, comment});
+    }
+    return lines;
+}
+
+/**
+ * Handles CUD of variables in env.
+ * 
+ * @param modifyType 
+ * @param options 
+ */
+const modifyVar = async (modifyType, options) => {
+
+    let nameResponse = options.name;
+    let valueResponse = options.value;
+    let encryptedResponse = options.encrypted;
+    let privateResponse = options.private;
+    let replacementData = { value: '' };
+
+    if (nameResponse === undefined) {
+        do {
+            nameResponse = await input({ message: 'Enter the variable name:' });
+        } while (!nameResponse);
+    }
+
+    const privateLines = await loadFileToMemory(ENV_FILE);
+    const publicLines = await loadFileToMemory(PUBLIC_ENV_FILE);
+
+    if (modifyType !== 'delete') {
+        if (encryptedResponse === undefined) {
+            encryptedResponse = await confirm({ message: 'Do you wish to encrypt this variable:' });
+        }
+        if (privateResponse === undefined) {
+            privateResponse = await confirm({ message: 'Do you wish this variable to be private only (not included in envpub):' });
+        }
+        do {
+            if (encryptedResponse || privateResponse) {
+                valueResponse = await password({ message: 'Enter the variable value:' });
+            } else {
+                valueResponse = await input({ message: 'Enter the variable value:' });
+            }
+        } while (!valueResponse);
+
+        for (const row of privateLines) {
+            if (modifyType == 'add' && row.key === nameResponse) {
+                console.error(`variable ${row.key} already exists in private file, use update instead.`);
+                process.exit(1);
+            }
+            if (row.encrypted && encryptedResponse) {
+                while (true) {
+                    try {
+                        await promptToDecrypt(row); // if it contains both private and public then we need the password to encrypt new private data.
+                        break;
+                    } catch (e) {
+                        console.log('incorrect password, try again.');
+                    }
+                }
+            }
+        }
+        for (const row of publicLines) {
+            if (modifyType == 'add' && row.key === nameResponse) {
+                console.error(`variable ${row.key} already exists in public file, use update instead.`);
+                process.exit(1);
+            }
+            if (row.encrypted && !row.private && encryptedResponse) {
+                while (true) {
+                    try {
+                        await promptToDecrypt(row); // if it contains both private and public then we need the password to encrypt new private data.
+                        break;
+                    } catch (e) {
+                        console.log('incorrect password, try again.');
+                    }
+                }
+            }
+        }
+
+        if (encryptedResponse) {
+            valueResponse = await promptToEncrypt(valueResponse);
+        } else {
+            valueResponse = {value: valueResponse};
+        }
+        replacementData = {encrypted: encryptedResponse, private: privateResponse, ...valueResponse};
+    }
+    const fileOutPrvStream = fs.createWriteStream(`${ENV_FILE}.tmp`);
+    const fileOutPubStream = fs.createWriteStream(`${PUBLIC_ENV_FILE}.tmp`);
+    switch (modifyType) {
+        case 'add':
+            for (const row of privateLines) {
+                fileOutPrvStream.write(`${row.line}\n`);
+            }
+            fileOutPrvStream.write(`${nameResponse}=${JSON.stringify(replacementData)}\n`);
+            
+            for (const row of publicLines) {
+                fileOutPubStream.write(`${row.line}\n`);
+            }
+            if (replacementData.private) {
+                replacementData.value = '';
+            }
+            fileOutPubStream.write(`${nameResponse}=${JSON.stringify(replacementData)}\n`);
+            break;
+        case 'update':
+            for (const row of privateLines) {
+                if (row.key === nameResponse) {
+                    fileOutPrvStream.write(`${nameResponse}=${JSON.stringify(replacementData)}\n`);
+                } else {
+                    fileOutPrvStream.write(`${row.line}\n`);
+                }
+            }
+            for (const row of publicLines) {
+                if (row.key === nameResponse) {
+                    if (replacementData.private) {
+                        replacementData.value = '';
+                    }
+                    fileOutPubStream.write(`${nameResponse}=${JSON.stringify(replacementData)}\n`);
+                } else {
+                    fileOutPubStream.write(`${row.line}\n`);
+                }
+            }
+            break;
+        case 'delete':
+            for (const row of privateLines) {
+                if (row.key !== nameResponse) {
+                    fileOutPrvStream.write(`${row.line}\n`);
+                }
+            }
+            for (const row of publicLines) {
+                if (row.key !== nameResponse) {
+                    fileOutPubStream.write(`${row.line}\n`);
+                }
+            }
+            break;
+    }
+      
+    fileOutPrvStream.close(() => {
+        fs.renameSync(`${ENV_FILE}.tmp`, ENV_FILE);
+    });
+    fileOutPubStream.close(() => {
+        fs.renameSync(`${PUBLIC_ENV_FILE}.tmp`, PUBLIC_ENV_FILE);
+    });
+    
+}
+
+/**
+ * For adding of variables in env and envpub file.
+ * @param options 
+ */
+const addVar = async (options) => {
+    modifyVar('add', options);
+}
+
+/**
+ * For updating of variables in env and envpub file.
+ * @param options 
+ */
+const updateVar = async (options) => {
+    modifyVar('update', options);
+}
+
+/**
+ * For deleting of variables in env and envpub file.
+ * @param options 
+ */
+const deleteVar = async (options) => {
+    modifyVar('delete', options);
+}
+
+/**
+ * Changes the password if there are any encrypted variables in env or envpub.
+ */
+const changePassword = async () => {
+    const privateLines = await loadFileToMemory(ENV_FILE);
+    const publicLines = await loadFileToMemory(PUBLIC_ENV_FILE);
+    const passwordResponse = await promptForPassword('Enter the new password to encrypt variables with:');
+    for (const row of privateLines) {
+        if (row.encrypted) {
+            while (true) {
+                try {
+                    const result = await promptToDecrypt(row); // if it contains both private and public then we need the password to encrypt new private data.
+                    row.value = encryptData(result, passwordResponse, row.salt, row.iv).value;
+                    row.line = `${row.key}=${JSON.stringify({
+                        encrypted: row.encrypted,
+                        private: row.private,
+                        value: row.value,
+                        iv: row.iv,
+                        salt: row.salt
+                    })}`
+                    break;
+                } catch (e) {
+                    console.log('incorrect password, try again.');
+                }
+            }
+        }
+    }
+    for (const row of publicLines) {
+        if (row.encrypted && !row.private) {
+            while (true) {
+                try {
+                    const result = await promptToDecrypt(row); // if it contains both private and public then we need the password to encrypt new private data.
+                    row.value = encryptData(result, passwordResponse, row.salt, row.iv).value;
+                    row.line = `${row.key}=${JSON.stringify({
+                        encrypted: row.encrypted,
+                        private: row.private,
+                        value: row.value,
+                        iv: row.iv,
+                        salt: row.salt
+                    })}`
+                    break;
+                } catch (e) {
+                    console.log('incorrect password, try again.');
+                }
+            }
+        }
+    }
+    const fileOutPrvStream = fs.createWriteStream(`${ENV_FILE}.tmp`);
+    const fileOutPubStream = fs.createWriteStream(`${PUBLIC_ENV_FILE}.tmp`);
+    for (const row of privateLines) {
+        fileOutPrvStream.write(`${row.line}\n`);
+    }
+    for (const row of publicLines) {
+        fileOutPubStream.write(`${row.line}\n`);
+    }
+    fileOutPrvStream.close(() => {
+        fs.renameSync(`${ENV_FILE}.tmp`, ENV_FILE);
+    });
+    fileOutPubStream.close(() => {
+        fs.renameSync(`${PUBLIC_ENV_FILE}.tmp`, PUBLIC_ENV_FILE);
+    });
+}
+
+/**
+ * Dumps the decrypted data to stdout as json data.
+ */
+const dumpData = async () => {
+    const areYouSure = await confirm({ message: 'Are you sure you want to output encrypted data to stdout:', default: false });
+    if (areYouSure) {
+        const privateLines = await loadFileToMemory(ENV_FILE);
+        const dumpData = {};
+        for (const row of privateLines) {
+            if (row.encrypted) {
+                while (true) {
+                    try {
+                        const result = await promptToDecrypt(row); // if it contains both private and public then we need the password to encrypt new private data.
+                        dumpData[row.key] = result;
+                        break;
+                    } catch (e) {
+                        console.log('incorrect password, try again.');
+                    }
+                }
+            } else {
+                dumpData[row.key] = row.value;
+            }
+        }
+        console.log(dumpData);
+    }
+}
+
+program
+  .version('1.0.0')
+  .description('localdev - a wrapper to nodemon to add proxy and encrypt env values.');
+
+program
+  .command('init')
+  .option('-p, --proxy', 'adds option to prompt for proxy to add to env file.', false)
+  .description('Initiates the building a .env file')
+  .action(init);
+
+program
+  .command('add')
+  .description('Adds a variable to the .env and .envpub file')
+  .option('-n, --name <name>', 'the name of the variable.')
+  .option('-v, --value <value>', 'the value of the variable.')
+  .option('-p, --private', 'is the variable private.')
+  .option('-e, --encrypted', 'is the variable encrypted.')
+  .action(addVar);
+
+program
+  .command('update')
+  .description('Updates a variable in the .env and .envpub file')
+  .option('-n, --name <name>', 'the name of the variable.')
+  .option('-v, --value <value>', 'the value of the variable.')
+  .option('-p, --private', 'is the variable private.')
+  .option('-e, --encrypted', 'is the variable encrypted.')
+  .action(updateVar);
+
+program
+  .command('delete')
+  .description('Deletes a variable in the .env and .envpub file')
+  .option('-n, --name <name>', 'the name of the variable.')
+  .action(deleteVar);
+
+program
+    .command('web <app>')
+    .option('-we, --watch-extra <watch>', 'add extra items to watch for change.')
+    .description('Starts and watches the web application using nodemon with environment variables decrypted.')
+    .action(startWeb);
+
+program
+    .command('app <app>')
+    .argument('[args...]') // need to add -- before any options on script
+    .description('Starts any application with environment variables decrypted.')
+    .action(startApp);
+
+program
+    .command('change-password')
+    .description('Changes the password for any encrypted variables in env and envpub file.')
+    .action(changePassword);
+
+program
+    .command('dump-data')
+    .description('Will decrypt and dump data to stdout.')
+    .action(dumpData);
+
+program
+    .command('encrypt <data>')
+    .description('Encrypts some data')
+    .action(async (data) => console.log(await promptToEncrypt(data)));
+
+program
+    .command('decrypt <data>')
+    .description('Decrypts some data')
+    .action(async (data) => console.log(await promptToDecrypt(data)));
+
+program.parse(process.argv);
