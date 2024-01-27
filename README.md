@@ -1,7 +1,7 @@
 # Env Public
 
 ## Purpose
-This application was put built to make sharing of a public env file possible with the ability to generate a local .env from a shared .envpub file. It was also built to make local development easier with a wrapper command for nodemon and any script, it will decrypted variables injected after password prompt.
+This application was built to make sharing of a public env file possible with the ability to generate a local .env from a shared .envpub file. It was also built to make local development easier with a wrapper command for nodemon and any script, it will decrypted variables injected after password prompt.
 
 ## Installation
 This application should be install globally but could possibly be run locally if needed. This has only currently been testing in nodejs 16 but should work for anything newer and may work for older versions.
